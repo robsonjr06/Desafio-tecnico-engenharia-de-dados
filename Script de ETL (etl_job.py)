@@ -1,0 +1,117 @@
+import sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+
+def get_db_properties():
+    """Retorna as propriedades de conexão com o DB."""
+    return {
+        "user": "postgres",
+        "password": "mysecretpassword",
+        "driver": "org.postgresql.Driver"
+    }
+
+def get_db_url():
+    """Retorna a URL JDBC do PostgreSQL."""
+    return "jdbc:postgresql://host.docker.internal:5432/postgres"
+
+def read_table(spark, table_name):
+    return spark.read.jdbc(
+        url=get_db_url(),
+        table=table_name,
+        properties=get_db_properties()
+    )
+
+def main(output_path):
+    """
+    Função principal do job ETL.
+    """
+    spark = SparkSession.builder \
+        .appName("SiCooperative ETL") \
+        .config("spark.jars", "https://jdbc.postgresql.org/download/postgresql-42.6.0.jar") \
+        .getOrCreate()
+
+    print("Iniciando extração de dados (Extract)...")
+
+    # 1. Extract: Ler as 4 tabelas
+    df_movimento = read_table(spark, "movimento")
+    df_cartao = read_table(spark, "cartao")
+    df_conta = read_table(spark, "conta")
+    df_associado = read_table(spark, "associado")
+
+    print("Iniciando transformação (Transform)...")
+
+    # 2. Transform: Juntar as tabelas para criar a visão única
+    # O desafio implica que a movimentação está ligada ao cartão, 
+    # o cartão ao associado, e a conta também ao associado.
+    
+    # Junção de movimento com cartão
+    df_join_1 = df_movimento.join(
+        df_cartao,
+        df_movimento.id_cartao == df_cartao.id,
+        "inner"
+    )
+
+    # Junção com associado
+    df_join_2 = df_join_1.join(
+        df_associado,
+        df_cartao.id_associado == df_associado.id,
+        "inner"
+    )
+
+    # Junção com conta (pode gerar duplicatas se 1 associado tem N contas)
+    # Isso é esperado, pois o associado pode ter várias contas
+    df_final_join = df_join_2.join(
+        df_conta,
+        df_associado.id == df_conta.id_associado,
+        "inner"
+    )
+
+    # 3. Transform: Selecionar e renomear colunas para o arquivo flat
+    df_flat = df_final_join.select(
+        col("nome").alias("nome_associado"),
+        col("sobrenome").alias("sobrenome_associado"),
+        col("idade").alias("idade_associado"),
+        col("vlr_transacao").alias("vlr_transacao_movimento"),
+        col("des_transacao").alias("des_transacao_movimento"),
+        col("data_movimento").alias("data_movimento"),
+        col("num_cartao").alias("numero_cartao"),
+        col("nom_impresso").alias("nome_impresso_cartao"),
+        col("data_criacao").alias("data_criacao_cartao"),
+        col("tipo_conta").alias("tipo_conta"),
+        col("data_criacao").alias("data_criacao_conta")
+    )
+    
+    # Ajuste para ambiguidade nos nomes das colunas 'data_criacao'
+    df_flat = df_final_join.select(
+        col("associado.nome").alias("nome_associado"),
+        col("associado.sobrenome").alias("sobrenome_associado"),
+        col("associado.idade").alias("idade_associado"),
+        col("movimento.vlr_transacao").alias("vlr_transacao_movimento"),
+        col("movimento.des_transacao").alias("des_transacao_movimento"),
+        col("movimento.data_movimento").alias("data_movimento"),
+        col("cartao.num_cartao").alias("numero_cartao"),
+        col("cartao.nom_impresso").alias("nome_impresso_cartao"),
+        col("cartao.data_criacao").alias("data_criacao_cartao"),
+        col("conta.tipo_conta").alias("tipo_conta"),
+        col("conta.data_criacao").alias("data_criacao_conta")
+    )
+
+    print(f"Iniciando carregamento (Load) para {output_path}...")
+
+    # 4. Load: Escrever em um único arquivo CSV
+    df_flat.coalesce(1).write \
+        .mode("overwrite") \
+        .option("header", "true") \
+        .csv(output_path)
+
+    print("Job ETL concluído com sucesso!")
+    spark.stop()
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Erro: É necessário fornecer o diretório de saída.")
+        print("Uso: spark-submit etl_job.py /caminho/para/saida")
+        sys.exit(1)
+    
+    output_dir = sys.argv[1]
+    main(output_dir)
