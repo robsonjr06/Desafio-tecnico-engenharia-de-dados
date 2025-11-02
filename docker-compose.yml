@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  # Serviço do Banco de Dados PostgreSQL
+  postgres-db:
+    image: postgres:14-alpine
+    container_name: postgres_db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - POSTGRES_DB=postgres
+    ports:
+      - "5432:5432" # Expõe a porta para o host (sua máquina)
+    # Monta os scripts SQL para inicializar o banco
+    volumes:
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/1_create_tables.sql
+      - ./sql/insert_data.sql:/docker-entrypoint-initdb.d/2_insert_data.sql
+
+  # Serviço do Job Spark
+  spark-etl-job:
+    container_name: spark_etl_job
+    # Cria a imagem a partir do Dockerfile no diretório atual
+    build: .
+    depends_on:
+      - postgres-db # Garante que o banco inicie antes do job
+    # Roda o script Spark e passa o diretório de saída
+    command: /app/output
+    # Mapeia o volume: O CSV será salvo em /app/output dentro do container
+    volumes:
+      - ./output:/app/output
+    # Permite que o container acesse o 'localhost' do host
+    # Necessário para o JDBC URL 'host.docker.internal'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
